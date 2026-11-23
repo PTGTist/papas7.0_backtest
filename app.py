@@ -6,6 +6,10 @@ from datetime import date, timedelta
 from io import BytesIO
 
 st.set_page_config(page_title="파파스 7.0 백테스트", layout="wide")
+
+sell_ratios = [0.10, 0.25, 0.50, 1.00]
+intervals = [x / 200 for x in range(2, 21)]  # 1.0% ~ 10.0%, 0.5% 단위
+
 st.title("파파스 7.0 백테스트")
 st.caption(f"{len(sell_ratios)*len(intervals)}개 조합 비교 · 과거 OHLC 데이터 기반 · CSV/XLSX 내보내기")
 
@@ -18,8 +22,6 @@ with st.sidebar:
     avg_cost = st.number_input("초기 평단가(USD)", min_value=0.01, value=30.88, step=0.01)
     st.markdown("---")
     st.subheader("전략 설정")
-    sell_ratios = [0.10, 0.25, 0.50, 1.00]
-    intervals = [x / 200 for x in range(2, 21)]  # 1.0% ~ 10.0%, 0.5% 단위
     st.caption("최초 매도 비율: 10% · 25% · 50% · 100%")
     st.caption("재매수 간격: 1%부터 10%까지 0.5% 단위")
     run = st.button("백테스트 실행", type="primary", use_container_width=True)
