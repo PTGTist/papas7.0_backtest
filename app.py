@@ -4,6 +4,7 @@ import pandas as pd
 import numpy as np
 from datetime import date, timedelta
 from io import BytesIO
+import re
 
 st.set_page_config(page_title="파파스 7.0 백테스트", layout="wide")
 
@@ -15,11 +16,12 @@ st.caption(f"{len(sell_ratios)*len(intervals)}개 조합 비교 · 과거 OHLC �
 
 with st.sidebar:
     st.header("백테스트 조건")
-    ticker = st.text_input("종목 티커", "SOXL").strip().upper()
+    ticker = st.text_input("종목 티커 / 종목코드", "SOXL",
+                           help="미국: SOXL, TQQQ 등 · 국내: 6자리 종목코드(예: 005930) 또는 005930.KS / 035720.KQ").strip().upper()
     start_date = st.date_input("백테스트 시작일", date(2022, 1, 1))
     end_date = st.date_input("백테스트 종료일", date.today() - timedelta(days=1))
     initial_shares = st.number_input("초기 보유 수량", min_value=0.0001, value=120.0, step=1.0)
-    avg_cost = st.number_input("초기 평단가(USD)", min_value=0.01, value=30.88, step=0.01)
+    avg_cost = st.number_input("초기 평단가(미국 USD · 국내 원)", min_value=0.01, value=30.88, step=0.01)
     st.markdown("---")
     st.subheader("전략 설정")
     st.caption("최초 매도 비율: 10% · 25% · 50% · 100%")
@@ -32,6 +34,15 @@ st.info(
     "주봉 몸통이 5주선 위로 완전히 올라오면 1차 메이크업, "
     "30주선이 횡보·상승하면서 주봉 몸통이 300주선 위로 완전히 올라오면 2차 메이크업을 실행합니다."
 )
+
+def resolve_symbols(t):
+    # 6자리 국내 종목코드면 코스피(.KS) → 코스닥(.KQ) 순서로 시도
+    if re.fullmatch(r"[0-9][0-9A-Z]{5}", t):
+        return [t + ".KS", t + ".KQ"]
+    return [t]
+
+def is_korean(symbol):
+    return symbol.endswith(".KS") or symbol.endswith(".KQ")
 
 def download_prices(symbol, start, end):
     # 300주선 계산을 위해 시작일보다 약 7년 앞선 데이터도 확보
@@ -214,7 +225,16 @@ if run:
         st.stop()
     try:
         with st.spinner("과거 가격 데이터 수집 및 전체 조합을 계산하고 있습니다..."):
-            prices = download_prices(ticker, start_date, end_date)
+            prices, last_err = None, None
+            for sym in resolve_symbols(ticker):
+                try:
+                    prices = download_prices(sym, start_date, end_date)
+                    ticker = sym
+                    break
+                except ValueError as err:
+                    last_err = err
+            if prices is None:
+                raise last_err
             signals = build_signals(prices)  # 주봉 신호는 한 번만 계산
             results = []
             details = {}
@@ -227,7 +247,8 @@ if run:
             summary = summary.sort_values(["수익률(%)"], ascending=False).reset_index(drop=True)
         # 화면 조작(선택 상자 변경)으로 다시 그려져도 결과가 사라지지 않도록 저장
         st.session_state["res"] = dict(ticker=ticker, start=start_date, end=end_date,
-                                       summary=summary, details=details, prices=prices)
+                                       summary=summary, details=details, prices=prices,
+                                       krw=is_korean(ticker))
     except Exception as e:
         st.session_state.pop("res", None)
         st.error(f"실행 오류: {e}")
@@ -236,14 +257,19 @@ if "res" in st.session_state:
     res = st.session_state["res"]
     ticker, start_date, end_date = res["ticker"], res["start"], res["end"]
     summary, details, prices = res["summary"], res["details"], res["prices"]
+    krw = res.get("krw", False)
+    def money(v):
+        return f"{v:,.0f}원" if krw else f"${v:,.2f}"
+    def relabel(df):
+        return df.rename(columns=lambda c: c.replace("($)", "(원)")) if krw else df
     st.success(f"{ticker} · {start_date} ~ {end_date} · {len(summary)}개 시나리오 계산 완료")
     c1,c2,c3 = st.columns(3)
     best = summary.iloc[0]
     c1.metric("수익률 1위", f"{best['수익률(%)']:.2f}%", f"매도 {best['매도비율']} / 간격 {best['재매수간격']}")
-    c2.metric("최고 최종자산", f"${best['최종자산($)']:,.2f}")
+    c2.metric("최고 최종자산", money(best['최종자산($)']))
     c3.metric("해당 전략 MDD", f"{best['MDD(%)']:.2f}%")
     st.subheader(f"{len(summary)}개 전략 성과 비교")
-    st.dataframe(summary.drop(columns=["기준매도가($)", "마지막종가($)"]), use_container_width=True, hide_index=True)
+    st.dataframe(relabel(summary.drop(columns=["기준매도가($)", "마지막종가($)"])), use_container_width=True, hide_index=True)
     pivot = summary.pivot(index="매도비율", columns="재매수간격", values="수익률(%)")
     st.subheader("수익률 비교표(%)")
     st.dataframe(pivot, use_container_width=True)
@@ -252,16 +278,16 @@ if "res" in st.session_state:
     selected_gap = st.selectbox("재매수 간격", intervals, format_func=lambda x:f"{x*100:.1f}%")
     detail = details[(selected_sell, selected_gap)]
     d1,d2,d3,d4 = st.columns(4)
-    d1.metric("최종 자산", f"${detail['최종자산($)']:,.2f}")
+    d1.metric("최종 자산", money(detail['최종자산($)']))
     d2.metric("최종 보유 수량", f"{detail['최종주식수']:,.4f}")
-    d3.metric("현금", f"${detail['최종현금($)']:,.2f}")
+    d3.metric("현금", money(detail['최종현금($)']))
     d4.metric("MDD", f"{detail['MDD(%)']:.2f}%")
     st.dataframe(detail["거래내역"], use_container_width=True, hide_index=True)
     st.line_chart(detail["일별자산"]["Equity"])
     # 다운로드용 통합 엑셀
     output = BytesIO()
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        summary.to_excel(writer, sheet_name="전략비교", index=False)
+        relabel(summary).to_excel(writer, sheet_name="전략비교", index=False)
         detail["거래내역"].to_excel(writer, sheet_name="선택전략_매매내역", index=False)
         detail["일별자산"].to_excel(writer, sheet_name="선택전략_일별자산")
         prices.loc[(prices.index.date >= start_date) & (prices.index.date <= end_date)].to_excel(writer, sheet_name="가격데이터")
@@ -273,7 +299,7 @@ if "res" in st.session_state:
     )
     st.download_button(
         "전략 비교 CSV 다운로드",
-        data=summary.to_csv(index=False).encode("utf-8-sig"),
+        data=relabel(summary).to_csv(index=False).encode("utf-8-sig"),
         file_name=f"{ticker}_papas7_summary.csv",
         mime="text/csv"
     )
